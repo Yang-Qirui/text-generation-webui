@@ -26,6 +26,7 @@ services:
     env_file: .env
     user: "${APP_RUNTIME_UID:-6972}:${APP_RUNTIME_GID:-6972}"
     ports:
+      # - "4396:4396" # These port is to call management llm
       - "${HOST_PORT:-7860}:${CONTAINER_PORT:-7860}"
       - "${HOST_API_PORT:-5000}:${CONTAINER_API_PORT:-5000}"
     stdin_open: true
@@ -42,6 +43,7 @@ services:
       - ./softprompts:/home/app/text-generation-webui/softprompts
       - ./training:/home/app/text-generation-webui/training
       - ./cloudflared:/etc/cloudflared
+      - ./modules:/home/app/text-generation-webui/modules
     deploy:
       resources:
         reservations:

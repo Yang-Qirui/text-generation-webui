@@ -29,6 +29,7 @@ from modules.text_generation import (
     get_max_prompt_length
 )
 from modules.utils import delete_file, get_available_characters, save_file
+import requests
 
 # Copied from the Transformers library
 jinja_env = ImmutableSandboxedEnvironment(trim_blocks=True, lstrip_blocks=True)
@@ -294,6 +295,91 @@ def get_stopping_strings(state):
 
     return result
 
+def custom_chatbot_wrapper(text, state, regenerate=False, _continue=False, loading_message=True, for_ui=False):
+    history = state['history']
+    output = copy.deepcopy(history)
+    output = apply_extensions('history', output)
+    state = apply_extensions('state', state)
+    logger.info(output)
+    visible_text = None
+    stopping_strings = get_stopping_strings(state)
+    is_stream = state['stream']
+
+    # Prepare the input
+    if not (regenerate or _continue):
+        
+        visible_text = html.escape(text)
+        # Apply extensions
+        text, visible_text = apply_extensions('chat_input', text, visible_text, state)
+        text = apply_extensions('input', text, state, is_chat=True)
+
+        response = requests.post("http://172.17.0.1:4396", visible_text)
+        output['internal'].append([text, ''])
+        output['visible'].append([visible_text, response.text])
+        logger.debug(response.text)
+
+        # *Is typing...*
+        if loading_message:
+            yield {
+                'visible': output['visible'][:-1] + [[output['visible'][-1][0], shared.processing_message]],
+                'internal': output['internal']
+            }
+    else:
+        text, visible_text = output['internal'][-1][0], output['visible'][-1][0]
+        if regenerate:
+            if loading_message:
+                yield {
+                    'visible': output['visible'][:-1] + [[visible_text, shared.processing_message]],
+                    'internal': output['internal'][:-1] + [[text, '']]
+                }
+        elif _continue:
+            last_reply = [output['internal'][-1][1], output['visible'][-1][1]]
+            if loading_message:
+                yield {
+                    'visible': output['visible'][:-1] + [[visible_text, last_reply[1] + '...']],
+                    'internal': output['internal']
+                }
+
+    # Generate the prompt
+    # TODO: add history
+    # kwargs = {
+        # '_continue': _continue,
+        # 'history': output if _continue else {k: v[:-1] for k, v in output.items()}
+    # }
+    # prompt = apply_extensions('custom_generate_chat_prompt', text, state, **kwargs)
+    # if prompt is None:
+    #     prompt = generate_chat_prompt(text, state, **kwargs)
+
+    # Generate
+    # reply = None
+    # for j, reply in enumerate(generate_reply(prompt, state, stopping_strings=stopping_strings, is_chat=True, for_ui=for_ui)):
+
+    #     # Extract the reply
+    #     visible_reply = reply
+    #     if state['mode'] in ['chat', 'chat-instruct']:
+    #         visible_reply = re.sub("(<USER>|<user>|{{user}})", state['name1'], reply)
+
+    #     visible_reply = html.escape(visible_reply)
+
+    #     if shared.stop_everything:
+    #         output['visible'][-1][1] = apply_extensions('output', output['visible'][-1][1], state, is_chat=True)
+    #         yield output
+    #         return
+
+    #     if _continue:
+    #         output['internal'][-1] = [text, last_reply[0] + reply]
+    #         output['visible'][-1] = [visible_text, last_reply[1] + visible_reply]
+    #         if is_stream:
+    #             yield output
+    #     elif not (j == 0 and visible_reply.strip() == ''):
+    #         output['internal'][-1] = [text, reply.lstrip(' ')]
+    #         output['visible'][-1] = [visible_text, visible_reply.lstrip(' ')]
+    #         if is_stream:
+    #             yield output
+    logger.debug(output['visible'][-1][1])
+    output['visible'][-1][1] = apply_extensions('output', output['visible'][-1][1], state, is_chat=True)
+    yield output
+
 
 def chatbot_wrapper(text, state, regenerate=False, _continue=False, loading_message=True, for_ui=False):
     history = state['history']
@@ -307,8 +393,9 @@ def chatbot_wrapper(text, state, regenerate=False, _continue=False, loading_mess
 
     # Prepare the input
     if not (regenerate or _continue):
+        
         visible_text = html.escape(text)
-
+        logger.info(f"{text}, {visible_text}")
         # Apply extensions
         text, visible_text = apply_extensions('chat_input', text, visible_text, state)
         text = apply_extensions('input', text, state, is_chat=True)
@@ -392,6 +479,18 @@ def impersonate_wrapper(text, state):
             return
 
 
+def custom_generate_chat_reply(text, state, regenerate=False, _continue=False, loading_message=True, for_ui=False):
+    history = state['history']
+    if regenerate or _continue:
+        text = ''
+        if (len(history['visible']) == 1 and not history['visible'][0][0]) or len(history['internal']) == 0:
+            yield history
+            return
+
+    logger.info("Checkpoint 2")
+    for history in custom_chatbot_wrapper(text, state, regenerate=regenerate, _continue=_continue, loading_message=loading_message, for_ui=for_ui):
+        yield history
+
 def generate_chat_reply(text, state, regenerate=False, _continue=False, loading_message=True, for_ui=False):
     history = state['history']
     if regenerate or _continue:
@@ -400,6 +499,7 @@ def generate_chat_reply(text, state, regenerate=False, _continue=False, loading_
             yield history
             return
 
+    logger.info("Checkpoint 2")
     for history in chatbot_wrapper(text, state, regenerate=regenerate, _continue=_continue, loading_message=loading_message, for_ui=for_ui):
         yield history
 
@@ -414,12 +514,37 @@ def character_is_loaded(state, raise_exception=False):
     else:
         return True
 
+def customized_generate_chat_reply_wrapper(text, state, regenerate=False, _continue=False):
+    '''
+    Same as above but returns HTML for the UI
+    '''
+    logger.info(text)
+    logger.info(state)
+    # if not character_is_loaded(state):
+    #     return
+
+    if state['start_with'] != '' and not _continue:
+        if regenerate:
+            text, state['history'] = remove_last_message(state['history'])
+            regenerate = False
+
+        _continue = True
+        send_dummy_message(text, state)
+        send_dummy_reply(state['start_with'], state)
+
+    logger.info("Checkpoint 1")
+    history = state['history']
+    for i, history in enumerate(custom_generate_chat_reply(text, state, regenerate, _continue, loading_message=True, for_ui=True)):
+        yield chat_html_wrapper(history, state['name1'], state['name2'], state['mode'], state['chat_style'], state['character_menu']), history
+
+    save_history(history, state['unique_id'], state['character_menu'], state['mode'])
 
 def generate_chat_reply_wrapper(text, state, regenerate=False, _continue=False):
     '''
     Same as above but returns HTML for the UI
     '''
-
+    logger.info(text)
+    logger.info(state)
     if not character_is_loaded(state):
         return
 
